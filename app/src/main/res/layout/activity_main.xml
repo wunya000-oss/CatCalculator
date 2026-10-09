@@ -41,3 +41,30 @@
             android:maxLines="1"
             android:textColor="#8E8E93"
             android:textSize="30sp" />
+
+        <LinearLayout
+            android:id="@+id/keys"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="80dp"
+            android:orientation="vertical" />
+
+    </LinearLayout>
+
+    <FrameLayout
+        android:id="@+id/catOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/catImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="24dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/cat" />
+
+    </FrameLayout>
+
+</FrameLayout>
