@@ -1,9 +1,12 @@
 package com.example.catcalc
 
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.os.Bundle
+import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.ImageView
@@ -24,6 +27,10 @@ class MainActivity : AppCompatActivity() {
         private const val SECRET = "16+5"
         private const val ERROR = "Ошибка"
         private const val SAMPLE_RATE = 22050
+        private val DIGIT_BG = Color.parseColor("#1C1C1C")
+        private val OPERATOR_BG = Color.parseColor("#2B2B2B")
+        private val EQUALS_BG = Color.parseColor("#1E7A6A")
+        private val RED = Color.parseColor("#FF6F61")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -41,31 +48,52 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildKeys(container: LinearLayout) {
         val rows = listOf(
-            listOf("C", "⌫", "÷", "×"),
-            listOf("7", "8", "9", "−"),
-            listOf("4", "5", "6", "+"),
-            listOf("1", "2", "3", "."),
-            listOf("0", "=")
+            listOf("C", "⌫", "%", "÷"),
+            listOf("7", "8", "9", "×"),
+            listOf("4", "5", "6", "−"),
+            listOf("1", "2", "3", "+"),
+            listOf("", "0", ".", "=")
         )
+        val size = (76 * resources.displayMetrics.density).toInt()
+        val gap = (12 * resources.displayMetrics.density).toInt()
+
         for (row in rows) {
             val rowLayout = LinearLayout(this)
             rowLayout.orientation = LinearLayout.HORIZONTAL
             for (label in row) {
-                val button = Button(this)
-                button.text = label
-                button.textSize = 22f
-                val weight = if (label == "0" || label == "=") 2f else 1f
-                button.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, weight).apply {
-                    setMargins(6, 6, 6, 6)
+                val cell = LinearLayout(this)
+                cell.gravity = Gravity.CENTER
+                cell.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                if (label.isNotEmpty()) {
+                    val button = Button(this)
+                    button.text = label
+                    button.textSize = 26f
+                    button.setTextColor(if (label == "C" || label == "⌫") RED else Color.WHITE)
+                    button.background = GradientDrawable().apply {
+                        shape = GradientDrawable.OVAL
+                        setColor(backgroundFor(label))
+                    }
+                    button.minWidth = 0
+                    button.minHeight = 0
+                    button.setPadding(0, 0, 0, 0)
+                    button.layoutParams = LinearLayout.LayoutParams(size, size)
+                    button.setOnClickListener { onKey(label) }
+                    cell.addView(button)
                 }
-                button.setOnClickListener { onKey(label) }
-                rowLayout.addView(button)
+                rowLayout.addView(cell)
             }
             container.addView(
                 rowLayout,
                 LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    .apply { setMargins(0, 0, 0, gap) }
             )
         }
+    }
+
+    private fun backgroundFor(label: String): Int = when (label) {
+        "=" -> EQUALS_BG
+        "÷", "×", "−", "+", "%" -> OPERATOR_BG
+        else -> DIGIT_BG
     }
 
     private fun onKey(key: String) {
@@ -87,7 +115,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun evaluate(input: String): String {
         val tokens = Regex("\\d+\\.?\\d*|[+\\-*/]")
-            .findAll(input.replace("×", "*").replace("÷", "/").replace("−", "-"))
+            .findAll(
+                input.replace("×", "*").replace("÷", "/").replace("−", "-").replace("%", "/100")
+            )
             .map { it.value }
             .toMutableList()
         while (tokens.isNotEmpty() && tokens.last() in setOf("+", "-", "*", "/")) {
