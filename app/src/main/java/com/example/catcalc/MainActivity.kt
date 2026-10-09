@@ -1,13 +1,17 @@
 package com.example.catcalc
 
+import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
 import android.content.res.ColorStateList
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.os.Build
 import android.os.Bundle
 import android.text.Spannable
 import android.text.SpannableStringBuilder
@@ -24,12 +28,15 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlin.math.PI
 import kotlin.math.min
 import kotlin.math.sin
 
 class MainActivity : AppCompatActivity() {
 
+    private lateinit var calcContent: LinearLayout
     private lateinit var expressionView: TextView
     private lateinit var resultView: TextView
     private lateinit var catOverlay: FrameLayout
@@ -37,6 +44,8 @@ class MainActivity : AppCompatActivity() {
 
     private var expression = ""
     private var typingAnimator: ValueAnimator? = null
+    private var blurAnimator: ValueAnimator? = null
+    private var currentBlur = 0f
     private var audioTrack: AudioTrack? = null
     private var catShown = false
 
@@ -45,17 +54,22 @@ class MainActivity : AppCompatActivity() {
         private const val ERROR = "Ошибка"
         private const val OPERATORS = "+−×÷%"
         private const val SAMPLE_RATE = 22050
+        private const val BLUR_MAX = 25f
         private val DIGIT_BG = Color.parseColor("#1F1F1F")
         private val OPERATOR_BG = Color.parseColor("#2C2C2C")
         private val EQUALS_BG = Color.parseColor("#1E7A6A")
         private val RED = Color.parseColor("#FF6F61")
         private val TEAL = Color.parseColor("#4DD0B8")
+        private val GREY = Color.parseColor("#8E8E93")
         private val RIPPLE = Color.parseColor("#55FFFFFF")
+        private val GLOW = Color.parseColor("#554DD0B8")
+        private val GLOW_TEXT = Color.parseColor("#A8F0E0")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        calcContent = findViewById(R.id.calcContent)
         expressionView = findViewById(R.id.expression)
         resultView = findViewById(R.id.result)
         catOverlay = findViewById(R.id.catOverlay)
@@ -64,36 +78,62 @@ class MainActivity : AppCompatActivity() {
         // тап по коту закрывает его
         catOverlay.setOnClickListener { hideCat() }
 
+        buildTopBar(findViewById(R.id.topBar))
         buildKeys(findViewById(R.id.keys))
         showExpression(animateLast = false)
     }
 
     override fun onDestroy() {
         typingAnimator?.cancel()
+        blurAnimator?.cancel()
         audioTrack?.release()
         super.onDestroy()
     }
 
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    // Верхний ряд как на фото: история слева, линейка и корень справа (пока только для вида)
+    private fun buildTopBar(bar: LinearLayout) {
+        bar.addView(iconView("↺"))
+        bar.addView(View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        bar.addView(iconView("📏"))
+        bar.addView(iconView("√"))
+    }
+
+    private fun iconView(label: String): TextView = TextView(this).apply {
+        text = label
+        textSize = 24f
+        setTextColor(GREY)
+        gravity = Gravity.CENTER
+        layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
+    }
+
     private fun buildKeys(container: LinearLayout) {
+        container.clipChildren = false
         val rows = listOf(
             listOf("C", "⌫", "%", "÷"),
             listOf("7", "8", "9", "×"),
             listOf("4", "5", "6", "−"),
             listOf("1", "2", "3", "+"),
-            listOf("", "0", ".", "=")
+            listOf("( )", "0", ",", "=")
         )
-        val density = resources.displayMetrics.density
-        val size = (76 * density).toInt()
-        val gap = (12 * density).toInt()
+        val size = dp(76)
+        val gap = dp(12)
 
         for (row in rows) {
-            val rowLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            val rowLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                clipChildren = false
+            }
             for (label in row) {
                 val cell = LinearLayout(this).apply {
                     gravity = Gravity.CENTER
+                    clipChildren = false
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 }
-                if (label.isNotEmpty()) cell.addView(makeKey(label, size))
+                cell.addView(makeKey(label, size))
                 rowLayout.addView(cell)
             }
             container.addView(
@@ -104,7 +144,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun makeKey(label: String, size: Int): TextView {
+    // Кнопка: круг с ореолом, который появляется при нажатии
+    private fun makeKey(label: String, size: Int): FrameLayout {
+        val rest = if (label == "C" || label == "⌫") RED else Color.WHITE
+
+        val halo = View(this).apply {
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(GLOW)
+            }
+            alpha = 0f
+        }
+
         val content = GradientDrawable().apply {
             shape = GradientDrawable.OVAL
             setColor(backgroundFor(label))
@@ -113,40 +164,72 @@ class MainActivity : AppCompatActivity() {
             shape = GradientDrawable.OVAL
             setColor(Color.WHITE)
         }
-        return TextView(this).apply {
+
+        val key = TextView(this).apply {
             text = label
             textSize = 28f
             gravity = Gravity.CENTER
-            setTextColor(if (label == "C" || label == "⌫") RED else Color.WHITE)
+            setTextColor(rest)
             background = RippleDrawable(ColorStateList.valueOf(RIPPLE), content, mask)
+        }
+        key.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> pressIn(key, halo)
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> pressOut(key, halo, rest)
+            }
+            false
+        }
+        key.setOnClickListener { onKey(label) }
+
+        return FrameLayout(this).apply {
+            clipChildren = false
             layoutParams = LinearLayout.LayoutParams(size, size)
-            setOnTouchListener { v, event -> onKeyTouch(v, event) }
-            setOnClickListener { onKey(label) }
+            addView(halo, FrameLayout.LayoutParams(size, size))
+            addView(key, FrameLayout.LayoutParams(size, size))
         }
     }
 
-    // Анимация нажатия: кнопка сжимается, а при отпускании пружинит обратно
-    private fun onKeyTouch(v: View, event: MotionEvent): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                v.animate()
-                    .scaleX(0.85f)
-                    .scaleY(0.85f)
-                    .setDuration(90)
-                    .setInterpolator(DecelerateInterpolator())
-                    .start()
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                v.animate()
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(320)
-                    .setInterpolator(OvershootInterpolator(2.5f))
-                    .start()
-            }
+    // Нажатие: кнопка сжимается, ореол разгорается, текст становится бирюзовым
+    private fun pressIn(key: TextView, halo: View) {
+        key.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        key.animate()
+            .scaleX(0.88f)
+            .scaleY(0.88f)
+            .setDuration(90)
+            .setInterpolator(DecelerateInterpolator())
+            .start()
+        halo.animate()
+            .alpha(1f)
+            .scaleX(1.25f)
+            .scaleY(1.25f)
+            .setDuration(140)
+            .start()
+        tintText(key, key.currentTextColor, GLOW_TEXT)
+    }
+
+    // Отпускание: кнопка пружинит обратно, ореол гаснет
+    private fun pressOut(key: TextView, halo: View, restColor: Int) {
+        key.animate()
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(320)
+            .setInterpolator(OvershootInterpolator(2.5f))
+            .start()
+        halo.animate()
+            .alpha(0f)
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(320)
+            .start()
+        tintText(key, key.currentTextColor, restColor)
+    }
+
+    private fun tintText(tv: TextView, from: Int, to: Int) {
+        ValueAnimator.ofObject(ArgbEvaluator(), from, to).apply {
+            duration = 160
+            addUpdateListener { tv.setTextColor(it.animatedValue as Int) }
+            start()
         }
-        return false
     }
 
     private fun backgroundFor(label: String): Int = when (label) {
@@ -161,6 +244,10 @@ class MainActivity : AppCompatActivity() {
             "C" -> expression = ""
             "⌫" -> expression = expression.dropLast(1)
             "=" -> expression = evaluate(expression)
+            "( )" -> {
+                val base = if (expression == ERROR) "" else expression
+                expression = base + parenthesisFor(base)
+            }
             else -> expression = (if (expression == ERROR) "" else expression) + key
         }
         val typedOne = key != "=" && expression.length == previous.length + 1
@@ -170,12 +257,21 @@ class MainActivity : AppCompatActivity() {
         if (expression == SECRET) showCat()
     }
 
+    // Умная скобка: закрывающая, если открыта и перед ней число, иначе открывающая
+    private fun parenthesisFor(base: String): String {
+        val open = base.count { it == '(' }
+        val close = base.count { it == ')' }
+        val last = base.lastOrNull()
+        val needClose = open > close && last != null && (last.isDigit() || last == ')' || last == '%')
+        return if (needClose) ")" else "("
+    }
+
     private fun updateResult() {
         val preview = if (expression.isEmpty()) "" else evaluate(expression)
         resultView.text = if (preview == ERROR || preview == expression) "" else groupDigits(preview)
     }
 
-    // "16 000 549" вместо "16000549"
+    // "6 000 549" вместо "6000549"
     private fun groupDigits(s: String): String {
         val negative = s.startsWith("-")
         val body = if (negative) s.substring(1) else s
@@ -226,15 +322,38 @@ class MainActivity : AppCompatActivity() {
         return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
     }
 
-    // Кот на весь экран: появляется с пружинкой и мяукает
+    // Размытие калькулятора: на Android 12+ настоящий блюр, на старых — приглушение
+    private fun animateBlur(to: Float, duration: Long) {
+        blurAnimator?.cancel()
+        blurAnimator = ValueAnimator.ofFloat(currentBlur, to).apply {
+            this.duration = duration
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { anim ->
+                currentBlur = anim.animatedValue as Float
+                applyBlur(currentBlur)
+            }
+            start()
+        }
+    }
+
+    private fun applyBlur(radius: Float) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            calcContent.setRenderEffect(
+                if (radius < 0.5f) null
+                else RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.CLAMP)
+            )
+        } else {
+            calcContent.alpha = 1f - 0.6f * (radius / BLUR_MAX)
+        }
+    }
+
+    // Кот поверх размытого калькулятора: появляется с пружинкой и мяукает
     private fun showCat() {
         if (catShown) return
         catShown = true
 
-        catOverlay.alpha = 0f
         catOverlay.visibility = View.VISIBLE
-        catOverlay.animate().alpha(1f).setDuration(250).start()
-
+        catImage.animate().cancel()
         catImage.scaleX = 0.2f
         catImage.scaleY = 0.2f
         catImage.alpha = 0f
@@ -242,18 +361,21 @@ class MainActivity : AppCompatActivity() {
             .scaleX(1f)
             .scaleY(1f)
             .alpha(1f)
-            .setStartDelay(80)
-            .setDuration(700)
+            .setDuration(650)
             .setInterpolator(OvershootInterpolator(1.4f))
             .start()
 
+        animateBlur(BLUR_MAX, 350)
         playMeow()
     }
 
+    // Кот уменьшается, размытие уходит, калькулятор очищается
     private fun hideCat() {
         if (!catShown) return
         catShown = false
-        catOverlay.animate()
+        catImage.animate()
+            .scaleX(0.2f)
+            .scaleY(0.2f)
             .alpha(0f)
             .setDuration(220)
             .withEndAction {
@@ -263,50 +385,96 @@ class MainActivity : AppCompatActivity() {
                 updateResult()
             }
             .start()
+        animateBlur(0f, 250)
     }
 
     private fun evaluate(input: String): String {
-        val tokens = Regex("\\d+\\.?\\d*|[+\\-*/]")
-            .findAll(
-                input.replace("×", "*").replace("÷", "/").replace("−", "-").replace("%", "/100")
-            )
-            .map { it.value }
-            .toMutableList()
-        while (tokens.isNotEmpty() && tokens.last() in setOf("+", "-", "*", "/")) {
-            tokens.removeAt(tokens.size - 1)
-        }
-        if (tokens.isEmpty()) return ""
+        var s = input
+            .replace("×", "*")
+            .replace("÷", "/")
+            .replace("−", "-")
+            .replace(",", ".")
+        // убираем хвост, который не к чему применить, и дописываем недостающие скобки
+        while (s.isNotEmpty() && s.last() in "+-*/.(") s = s.dropLast(1)
+        val missing = s.count { it == '(' } - s.count { it == ')' }
+        s += ")".repeat(maxOf(0, missing))
+        if (s.isEmpty()) return ""
         return try {
-            // сначала умножение и деление
-            var i = 1
-            while (i < tokens.size) {
-                if (tokens[i] == "*" || tokens[i] == "/") {
-                    val a = tokens[i - 1].toDouble()
-                    val b = tokens[i + 1].toDouble()
-                    if (tokens[i] == "/" && b == 0.0) throw ArithmeticException()
-                    tokens[i - 1] = (if (tokens[i] == "*") a * b else a / b).toString()
-                    tokens.removeAt(i)
-                    tokens.removeAt(i)
-                } else {
-                    i += 2
-                }
-            }
-            // потом сложение и вычитание
-            var result = tokens[0].toDouble()
-            i = 1
-            while (i < tokens.size) {
-                val b = tokens[i + 1].toDouble()
-                result = if (tokens[i] == "+") result + b else result - b
-                i += 2
-            }
-            format(result)
+            format(Parser(s).parse())
         } catch (e: Exception) {
             ERROR
         }
     }
 
-    private fun format(d: Double): String =
-        if (d % 1.0 == 0.0) d.toLong().toString() else d.toString()
+    private fun format(d: Double): String {
+        if (d.isNaN() || d.isInfinite()) throw ArithmeticException()
+        return BigDecimal(d).setScale(10, RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+    }
+
+    // Разбор выражения: скобки, приоритет умножения, проценты
+    private class Parser(private val s: String) {
+        private var pos = 0
+
+        fun parse(): Double {
+            val value = expr()
+            if (pos != s.length) throw IllegalArgumentException()
+            return value
+        }
+
+        private fun peek(): Char? = if (pos < s.length) s[pos] else null
+
+        private fun expr(): Double {
+            var value = term()
+            while (peek() == '+' || peek() == '-') {
+                val op = s[pos++]
+                val right = term()
+                value = if (op == '+') value + right else value - right
+            }
+            return value
+        }
+
+        private fun term(): Double {
+            var value = factor()
+            while (peek() == '*' || peek() == '/') {
+                val op = s[pos++]
+                val right = factor()
+                value = if (op == '*') {
+                    value * right
+                } else {
+                    if (right == 0.0) throw ArithmeticException()
+                    value / right
+                }
+            }
+            return value
+        }
+
+        private fun factor(): Double {
+            if (peek() == '-') {
+                pos++
+                return -factor()
+            }
+            var value = primary()
+            while (peek() == '%') {
+                pos++
+                value /= 100
+            }
+            return value
+        }
+
+        private fun primary(): Double {
+            if (peek() == '(') {
+                pos++
+                val value = expr()
+                if (peek() != ')') throw IllegalArgumentException()
+                pos++
+                return value
+            }
+            val start = pos
+            while (pos < s.length && (s[pos].isDigit() || s[pos] == '.')) pos++
+            if (start == pos) throw IllegalArgumentException()
+            return s.substring(start, pos).toDouble()
+        }
+    }
 
     private fun playMeow() {
         val samples = makeMeow()
